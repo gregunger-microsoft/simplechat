@@ -47,3 +47,5 @@ flask_session
 **/my_chart.png
 **/sample_pie.csv
 **/sample_stacked_column.csv
+application/external_apps/mcp/logs/mcp_stderr.log
+application/external_apps/mcp/logs/mcp_stdout.log

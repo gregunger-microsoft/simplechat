@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1.7-labs
+
+FROM python:3.13-slim AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:$PATH"
+
+WORKDIR /app
+
+# Create venv
+RUN python -m venv /app/venv
+
+# Install build deps only if needed
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libffi-dev \
+        libssl-dev \
+        libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for caching
+COPY application/single_app/requirements.txt /app/requirements.txt
+
+# Install Python deps
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip wheel && \
+    pip install -r /app/requirements.txt
+
+# Copy app code
+COPY application/single_app/ /app/
+
+# Create nonroot user and fix permissions
+RUN groupadd -g 65532 nonroot && \
+    useradd -m -u 65532 -g nonroot nonroot && \
+    mkdir -p /app/flask_session /sc-temp-files && \
+    chown -R 65532:65532 /app /sc-temp-files
+
+USER 65532:65532
+
+# Runtime image
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:$PATH"
+
+WORKDIR /app
+
+COPY --from=builder --chown=65532:65532 /app /app
+
+RUN mkdir -p /sc-temp-files && chown -R 65532:65532 /sc-temp-files
+
+EXPOSE 5000
+
+USER 65532:65532
+
+ENTRYPOINT ["python", "/app/app.py"]

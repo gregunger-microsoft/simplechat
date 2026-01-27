@@ -1,6 +1,7 @@
 # functions_authentication.py
 
 from config import *
+from flask import g
 from functions_settings import *
 from functions_debug import debug_print
 
@@ -463,13 +464,16 @@ def accesstoken_required(f):
         if not is_valid:
             return jsonify({"message": data}), 401
 
-        # Check for "ExternalApi" role in the token claims
+        # Check for permitted roles in the token claims
         roles = data.get("roles") if isinstance(data, dict) else None
-        if not roles or "ExternalApi" not in roles:
-            return jsonify({"message": "Forbidden: ExternalApi role required"}), 403
+        allowed_roles = {"ExternalApi", "User", "Admin"}
+        if not roles or not any(role in allowed_roles for role in roles):
+            return jsonify({"message": "Forbidden: ExternalApi, User, or Admin role required"}), 403
 
         debug_print("User is valid")
 
+        if isinstance(data, dict):
+            g.user_claims = data
         # You can now access claims from `data`, e.g., data['sub'], data['name'], data['roles']
         #kwargs['user_claims'] = data # Pass claims to the decorated function # NOT NEEDED FOR NOW
         return f(*args, **kwargs)
