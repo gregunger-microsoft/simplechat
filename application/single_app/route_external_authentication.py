@@ -35,7 +35,8 @@ def register_route_external_authentication(app):
                 "userId": claims.get("oid") or claims.get("sub"),
                 "displayName": claims.get("name"),
                 "email": claims.get("preferred_username") or claims.get("email")
-            }
+            },
+            "claims": claims
         }
 
         debug_print(f"External login session created for user {response_payload['user'].get('userId')}")

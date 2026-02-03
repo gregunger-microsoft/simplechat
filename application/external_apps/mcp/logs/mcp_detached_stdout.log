@@ -1,0 +1,19 @@
+INFO:     127.0.0.1:57849 - "GET /.well-known/oauth-protected-resource HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57856 - "GET /mcp HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57860 - "GET /.well-known/oauth-protected-resource HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57864 - "POST /mcp HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57864 - "POST /mcp HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:57865 - "GET /.well-known/oauth-protected-resource HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57864 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57864 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57865 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:57865 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57865 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57865 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59636 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63021 - "GET /.well-known/oauth-protected-resource HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51677 - "GET /.well-known/oauth-protected-resource HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51728 - "GET /.well-known/oauth-protected-resource HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56010 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49832 - "GET /.well-known/oauth-protected-resource HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59183 - "GET /.well-known/oauth-protected-resource HTTP/1.1" 200 OK

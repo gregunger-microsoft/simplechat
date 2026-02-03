@@ -44,17 +44,17 @@ Each feature documentation file must include:
 
 ## Integration Process
 When documenting a new feature:
-1. Create markdown file in `..\docs\features\`
-2. Include current config.py version
+1. Create markdown file in `..\docs\explanation\features\`
+2. Include current config.py version only if a version bump was explicitly requested
 3. Reference related functional tests
 4. Link to any fix documentation if the feature required bug fixes
 
 ## Cross-References
 Feature documentation may reference:
-- Related fix documentation in `..\docs\fixes\`
+- Related fix documentation in `..\docs\explanation\fixes\`
 - Functional test files in `functional_tests\`
 - Configuration changes in `config.py`
-- Other features in `..\docs\features\`
+- Other features in `..\docs\explanation\features\`
 
 ## Maintenance
 Keep feature documentation updated when:

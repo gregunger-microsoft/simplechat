@@ -6,7 +6,7 @@ applyTo: '**'
 
 ## Required Version Inclusion
 
-When creating functional tests and documentation for fixes or features, always include the current version from `config.py`:
+When creating functional tests and documentation for fixes or features, include the current version from `config.py` if the user has explicitly requested a version bump.
 
 ### 1. Functional Test Files
 All functional test files must include a comment header with:
@@ -34,10 +34,10 @@ All fix and feature documentation must include:
 
 ### 3. Version Update Process
 When implementing fixes or features:
-1. Update the version in `config.py`: `app.config['VERSION'] = "X.X.X"`
-2. Include this version in functional test file headers
-3. Include this version in documentation markdown files
-4. Ensure consistency across all related files
+1. Only update the version in `config.py` when the user explicitly requests a version bump.
+2. If a version was updated, include it in functional test file headers.
+3. If a version was updated, include it in documentation markdown files.
+4. Ensure consistency across all related files when version updates are requested.
 
 ### 4. Version Tracking Benefits
 - Clear traceability of when fixes/features were implemented

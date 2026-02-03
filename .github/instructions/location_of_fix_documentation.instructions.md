@@ -38,13 +38,13 @@ Each fix documentation file must include:
 
 ## Integration Process
 When documenting a fix:
-1. Create markdown file in `..\docs\fixes\`
-2. Include current config.py version
+1. Create markdown file in `..\docs\explanation\fixes\`
+2. Include current config.py version only if a version bump was explicitly requested
 3. Reference related functional tests
 4. Update any relevant feature documentation if the fix affects existing features
 
 ## Cross-References
 Fix documentation may reference:
-- Related feature documentation in `..\docs\features\`
+- Related feature documentation in `..\docs\explanation\features\`
 - Functional test files in `functional_tests\`
 - Configuration changes in `config.py`

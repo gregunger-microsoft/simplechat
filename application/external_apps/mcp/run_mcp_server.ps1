@@ -19,6 +19,18 @@ if (-not (Test-Path $logDir)) {
 $stdoutLog = Join-Path $logDir "mcp_stdout.log"
 
 Set-Location -Path $mcpRoot
-$env:FASTMCP_HOST = "localhost"
+$env:FASTMCP_HOST = "0.0.0.0"
 $env:FASTMCP_PORT = "8000"
-& $venvPython -c "import server; server.mcp.run(transport='streamable-http')" 2>&1 | Tee-Object -FilePath $stdoutLog
+
+$existingListener = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
+if ($existingListener) {
+    Write-Host "MCP server already running on port 8000."
+    exit 0
+}
+
+# Start detached so the script can exit while the server keeps running.
+$stderrLog = Join-Path $logDir "mcp_stderr.log"
+
+$proc = Start-Process -FilePath $venvPython -ArgumentList @("server_minimal.py") -WorkingDirectory $mcpRoot -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -WindowStyle Hidden -PassThru
+
+Write-Host "Started MCP server (PID $($proc.Id)) on http://localhost:8000/mcp"

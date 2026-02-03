@@ -47,7 +47,7 @@ log_event("[SK Loader] Starting loader imports")
 try:
     from semantic_kernel.agents import ChatCompletionAgent
     from agent_logging_chat_completion import LoggingChatCompletionAgent
-    from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+    from semantic_kernel.connectors.ai.open_ai.services.azure_chat_completion import AzureChatCompletion
 except ImportError:
     ChatCompletionAgent = None
     AzureChatCompletion = None

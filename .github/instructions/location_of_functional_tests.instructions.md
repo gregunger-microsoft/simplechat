@@ -5,7 +5,7 @@ applyTo: '**'
 # Functional Tests Management Instructions
 
 ## 📍 **Location**
-All functional tests are stored in: `.\simplechat\functional_tests\`
+All functional tests are stored in: `.\functional_tests\`
 
 ## 📂 **Directory Structure**
 The functional tests directory contains:
@@ -59,6 +59,8 @@ Brief description of what this test validates.
 This test ensures [specific functionality] works correctly and 
 prevents regression of [specific issue/bug].
 """
+
+# Include Version: X.Y.Z in this header only when a version bump was explicitly requested.
 
 import sys
 import os
