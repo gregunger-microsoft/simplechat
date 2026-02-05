@@ -3,7 +3,7 @@
 
 Goals:
 - Only what we need: login via device code and access SimpleChat.
-- Read config exclusively from application/external_apps/mcp/.env.
+- Read config from environment variables (optionally loaded from application/external_apps/mcp/.env when present).
 - Verbose, safe logs (never print secrets).
 
 Tools exposed:
@@ -31,17 +31,43 @@ from mcp.server.fastmcp import Context, FastMCP
 _DOTENV_PATH = Path(__file__).resolve().parent / ".env"
 if _DOTENV_PATH.exists():
     load_dotenv(dotenv_path=_DOTENV_PATH, override=True)
-else:
-    load_dotenv(override=True)
 
-DEFAULT_MCP_HOST = "localhost"
-DEFAULT_MCP_PORT = 8000
-DEFAULT_REQUIRE_MCP_AUTH = os.getenv("MCP_REQUIRE_AUTH", "false").strip().lower() in ["1", "true", "yes", "y", "on"]
-DEFAULT_PRM_METADATA_PATH = os.getenv("MCP_PRM_METADATA_PATH", "prm_metadata.json").strip() or "prm_metadata.json"
 
-_env_port = os.getenv("FASTMCP_PORT", "").strip()
-if _env_port and _env_port != str(DEFAULT_MCP_PORT):
-    print(f"[MCP] Ignoring FASTMCP_PORT={_env_port}; port is fixed at {DEFAULT_MCP_PORT}.")
+def _require_env_value(name: str) -> str:
+    """Return a required setting from environment variables.
+
+    Local development may provide these via application/external_apps/mcp/.env.
+    Azure deployments should provide these as App Settings / env vars.
+    """
+    value = os.getenv(name, "").strip()
+    if not value:
+        source_hint = f" (loadable from {_DOTENV_PATH} when present)" if _DOTENV_PATH.exists() else ""
+        raise ValueError(f"Missing required environment variable {name}{source_hint}")
+    return value
+
+
+def _require_env_int(name: str) -> int:
+    raw = _require_env_value(name)
+    try:
+        return int(raw)
+    except Exception as exc:
+        raise ValueError(f"Invalid integer for {name}: {raw!r} ({exc})")
+
+
+def _require_env_bool(name: str) -> bool:
+    raw = _require_env_value(name).strip().lower()
+    if raw in ["1", "true", "yes", "y", "on"]:
+        return True
+    if raw in ["0", "false", "no", "n", "off"]:
+        return False
+    raise ValueError(f"Invalid boolean for {name}: {raw!r} (use true/false)")
+
+
+DEFAULT_REQUIRE_MCP_AUTH = _require_env_bool("MCP_REQUIRE_AUTH")
+DEFAULT_PRM_METADATA_PATH = _require_env_value("MCP_PRM_METADATA_PATH").strip()
+
+MCP_BIND_HOST = _require_env_value("FASTMCP_HOST")
+MCP_BIND_PORT = _require_env_int("FASTMCP_PORT")
 
 
 _mcp = FastMCP("simplechat-mcp-minimal")
@@ -56,7 +82,7 @@ _LOGIN_PAYLOAD_CACHE: Dict[str, Dict[str, Any]] = {}
 # Cache bearer token per MCP streamable-http session id. This lets the server reuse
 # the PRM-provided bearer token across tool calls even if the client doesn't resend it.
 _MCP_SESSION_TOKEN_CACHE: Dict[str, Dict[str, Any]] = {}
-_MCP_SESSION_TOKEN_TTL_SECONDS = int(os.getenv("MCP_SESSION_TOKEN_TTL_SECONDS", "3600").strip() or "3600")
+_MCP_SESSION_TOKEN_TTL_SECONDS = _require_env_int("MCP_SESSION_TOKEN_TTL_SECONDS")
 
 _STATE_LOCK = threading.Lock()
 _STATE: Dict[str, Any] = {
@@ -76,11 +102,9 @@ _STATE: Dict[str, Any] = {
 }
 
 
-def _env(name: str, required: bool = True) -> str:
-    value = os.getenv(name, "").strip()
-    if required and not value:
-        raise ValueError(f"Missing required setting {name} in {_DOTENV_PATH}")
-    return value
+def _env(name: str) -> str:
+    """Back-compat helper: required value from environment variables (no defaults)."""
+    return _require_env_value(name)
 
 
 def _extract_bearer_token(auth_header: str) -> Optional[str]:
@@ -118,9 +142,8 @@ def _get_or_create_simplechat_session(bearer_token: str) -> requests.Session:
             print("[MCP] Using cached SimpleChat session for token")
             return _SESSION_CACHE[bearer_token]
     
-    # Create new session
-    simplechat_base_url = _env("SIMPLECHAT_BASE_URL", required=False) or "https://localhost:5000"
-    simplechat_verify_ssl = os.getenv("SIMPLECHAT_VERIFY_SSL", "true").strip().lower() in ["1", "true", "yes", "y", "on"]
+    simplechat_base_url = _env("SIMPLECHAT_BASE_URL")
+    simplechat_verify_ssl = _require_env_bool("SIMPLECHAT_VERIFY_SSL")
     
     print("[MCP] Creating new SimpleChat session via /external/login")
     
@@ -164,14 +187,6 @@ def _get_cached_login_payload(bearer_token: str) -> Optional[Dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
-def _resolve_device_code_url(token_url: str) -> str:
-    if token_url.endswith("/oauth2/v2.0/token"):
-        return token_url.replace("/oauth2/v2.0/token", "/oauth2/v2.0/devicecode")
-    if token_url.endswith("/oauth2/token"):
-        return token_url.replace("/oauth2/token", "/oauth2/devicecode")
-    raise ValueError("Cannot infer device-code URL from OAUTH_TOKEN_URL; set OAUTH_DEVICE_CODE_URL.")
-
-
 def _request_device_code(device_code_url: str, client_id: str, scope: str) -> Dict[str, Any]:
     print(f"[MCP] Requesting device code from {device_code_url}")
     response = requests.post(
@@ -186,6 +201,17 @@ def _request_device_code(device_code_url: str, client_id: str, scope: str) -> Di
             payload = {"raw": response.text}
         raise RuntimeError(f"Device code request failed ({response.status_code}): {payload}")
     return response.json()
+
+
+def _infer_device_code_url(token_url: str) -> str:
+    token_url = (token_url or "").strip()
+    if token_url.endswith("/oauth2/v2.0/token"):
+        return token_url.replace("/oauth2/v2.0/token", "/oauth2/v2.0/devicecode")
+    if token_url.endswith("/oauth2/token"):
+        return token_url.replace("/oauth2/token", "/oauth2/devicecode")
+    raise ValueError(
+        "Cannot infer device-code URL from OAUTH_TOKEN_URL; set OAUTH_DEVICE_CODE_URL."
+    )
 
 
 def _poll_device_code_token(
@@ -256,8 +282,8 @@ def _poll_device_code_token(
 def _start_background_poll() -> None:
     token_url = _env("OAUTH_TOKEN_URL")
     client_id = _env("OAUTH_CLIENT_ID")
-    client_secret = _env("OAUTH_CLIENT_SECRET", required=False)
-    timeout_seconds = int(os.getenv("OAUTH_TIMEOUT_SECONDS", "900").strip() or "900")
+    client_secret = _env("OAUTH_CLIENT_SECRET")
+    timeout_seconds = _require_env_int("OAUTH_TIMEOUT_SECONDS")
 
     with _STATE_LOCK:
         device_code = _STATE.get("device_code")
@@ -281,15 +307,14 @@ def _start_background_poll() -> None:
             if not access_token:
                 raise RuntimeError(f"Token payload missing access_token: {token_payload}")
 
-            # Create SimpleChat session
-            simplechat_base_url = _env("SIMPLECHAT_BASE_URL", required=False) or "https://localhost:5000"
-            simplechat_verify_ssl = os.getenv("SIMPLECHAT_VERIFY_SSL", "true").strip().lower() in ["1", "true", "yes", "y", "on"]
+            simplechat_base_url = _env("SIMPLECHAT_BASE_URL")
+            simplechat_verify_ssl = _require_env_bool("SIMPLECHAT_VERIFY_SSL")
             
             session = requests.Session()
             session.headers.update({"Authorization": f"Bearer {access_token}"})
             
             print(f"[MCP] Creating SimpleChat session at {simplechat_base_url}/external/login")
-            print(f"[MCP] Token length: {len(access_token)} chars, first 20: {access_token[:20]}...")
+            print(f"[MCP] Token length: {len(access_token)} chars")
             external_login_response = session.post(
                 f"{simplechat_base_url}/external/login",
                 verify=simplechat_verify_ssl,
@@ -339,11 +364,12 @@ def login_via_oauth() -> Dict[str, Any]:
 
     Returns device-code instructions (user_code, verification_uri).
     """
-    token_url = _env("OAUTH_TOKEN_URL")
     client_id = _env("OAUTH_CLIENT_ID")
     scope = _env("OAUTH_SCOPES")
 
-    device_code_url = os.getenv("OAUTH_DEVICE_CODE_URL", "").strip() or _resolve_device_code_url(token_url)
+    token_url = _env("OAUTH_TOKEN_URL")
+    explicit_device_code_url = os.getenv("OAUTH_DEVICE_CODE_URL", "").strip()
+    device_code_url = explicit_device_code_url or _infer_device_code_url(token_url)
 
     device_payload = _request_device_code(device_code_url, client_id, scope)
 
@@ -357,11 +383,14 @@ def login_via_oauth() -> Dict[str, Any]:
     if not device_code or not user_code or not verification_uri:
         raise RuntimeError(f"Device code response missing required fields: {device_payload}")
 
-    # Open browser for convenience.
-    try:
-        webbrowser.open(verification_uri_complete or verification_uri)
-    except Exception as exc:
-        print(f"[MCP] webbrowser.open failed: {exc}")
+    # Never auto-open a browser unless explicitly enabled.
+    open_browser_raw = os.getenv("OAUTH_OPEN_BROWSER", "false").strip().lower()
+    open_browser = open_browser_raw in ["1", "true", "yes", "y", "on"]
+    if open_browser:
+        try:
+            webbrowser.open(verification_uri_complete or verification_uri)
+        except Exception as exc:
+            print(f"[MCP] webbrowser.open failed: {exc}")
 
     with _STATE_LOCK:
         event = threading.Event()
@@ -401,35 +430,80 @@ def login_via_oauth() -> Dict[str, Any]:
 
 
 @_mcp.tool(name="oauth_login_status")
-def oauth_login_status() -> Dict[str, Any]:
-    """Return current login status and safe diagnostics."""
-    client_secret_value = os.getenv("OAUTH_CLIENT_SECRET", "")
-    client_secret_present = bool(client_secret_value.strip())
+def oauth_login_status(ctx: Optional[Context[Any, Any, Any]] = None) -> Dict[str, Any]:
+    """Return current login status.
+
+    This is intentionally not tied to a specific login mechanism.
+
+    - If the call is authenticated via PRM (bearer token), it reports PRM status.
+    - If a device-code flow was used, it also reports the device-code status.
+    """
+
+    bearer_token = _get_bearer_token_from_context(ctx) if ctx is not None else None
+    has_prm_bearer_token = bool(bearer_token)
+
+    simplechat_base_url_present = bool(os.getenv("SIMPLECHAT_BASE_URL", "").strip())
+    simplechat_verify_ssl_present = bool(os.getenv("SIMPLECHAT_VERIFY_SSL", "").strip())
+
+    prm_session_ok: Optional[bool] = None
+    prm_error: Optional[str] = None
+    prm_user: Dict[str, Any] = {}
+
+    if has_prm_bearer_token:
+        if simplechat_base_url_present and simplechat_verify_ssl_present:
+            try:
+                _get_or_create_simplechat_session(cast(str, bearer_token))
+                prm_session_ok = True
+                payload = _get_cached_login_payload(cast(str, bearer_token)) or {}
+                user = payload.get("user")
+                if isinstance(user, dict):
+                    prm_user = {
+                        "userId": user.get("userId"),
+                        "displayName": user.get("displayName"),
+                        "email": user.get("email"),
+                    }
+            except Exception as exc:
+                prm_session_ok = False
+                prm_error = str(exc)
+        else:
+            prm_session_ok = None
+            missing: list[str] = []
+            if not simplechat_base_url_present:
+                missing.append("SIMPLECHAT_BASE_URL")
+            if not simplechat_verify_ssl_present:
+                missing.append("SIMPLECHAT_VERIFY_SSL")
+            prm_error = f"Cannot validate PRM session; missing env vars: {', '.join(missing)}"
 
     with _STATE_LOCK:
-        event = _STATE.get("event")
         pending = bool(_STATE.get("pending"))
-        error = _STATE.get("error")
-        status = "pending" if pending else ("complete" if _STATE.get("access_token") else "none")
+        device_code_has_token = bool(_STATE.get("access_token"))
+        device_code_error = _STATE.get("error")
+        device_code_status = "pending" if pending else ("complete" if device_code_has_token else "none")
+
+        logged_in = (prm_session_ok is True) or device_code_has_token
+
         result: Dict[str, Any] = {
-            "status": status,
-            "pending": pending,
-            "error": error,
-            "auth_flow": _STATE.get("auth_flow"),
-            "user_code": _STATE.get("user_code"),
-            "verification_uri": _STATE.get("verification_uri"),
-            "verification_uri_complete": _STATE.get("verification_uri_complete"),
-            "expires_in": _STATE.get("expires_in"),
-            "interval": _STATE.get("interval"),
+            "logged_in": logged_in,
+            "prm": {
+                "has_bearer_token": has_prm_bearer_token,
+                "session_ok": prm_session_ok,
+                "error": prm_error,
+                "user": prm_user,
+            },
+            "device_code": {
+                "status": device_code_status,
+                "pending": pending,
+                "error": device_code_error,
+                "auth_flow": _STATE.get("auth_flow"),
+                "user_code": _STATE.get("user_code"),
+                "verification_uri": _STATE.get("verification_uri"),
+                "verification_uri_complete": _STATE.get("verification_uri_complete"),
+                "expires_in": _STATE.get("expires_in"),
+                "interval": _STATE.get("interval"),
+            },
             "dotenv_path": str(_DOTENV_PATH),
             "dotenv_found": _DOTENV_PATH.exists(),
-            "oauth_client_secret_present": client_secret_present,
-            "oauth_client_secret_length": len(client_secret_value.strip()) if client_secret_present else 0,
         }
-
-    if isinstance(event, threading.Event) and pending:
-        # Don’t block too long; status is meant to be polled.
-        pass
 
     return result
 
@@ -442,12 +516,18 @@ def show_user_profile(ctx: Context[Any, Any, Any]) -> Dict[str, Any]:
     PRM/MCP client authentication and reuses that bearer token.
     """
     bearer_token = _get_bearer_token_from_context(ctx)
+    auth_source = "prm" if bearer_token else "device_code"
     if not bearer_token:
-        return {
-            "success": False,
-            "error": "no_bearer_token",
-            "message": "No bearer token available. PRM authentication is required.",
-        }
+        with _STATE_LOCK:
+            access_token = _STATE.get("access_token")
+        if isinstance(access_token, str) and access_token.strip():
+            bearer_token = access_token.strip()
+        else:
+            return {
+                "success": False,
+                "error": "not_authenticated",
+                "message": "Not authenticated. Provide a PRM bearer token or complete device-code login.",
+            }
 
     try:
         _get_or_create_simplechat_session(bearer_token)
@@ -469,10 +549,29 @@ def show_user_profile(ctx: Context[Any, Any, Any]) -> Dict[str, Any]:
         claims = {}
     claims = cast(Dict[str, Any], claims)
 
+    # Extract roles and delegated permissions with clear labels.
+    # Collect all roles from both the "roles" claim and the "scp" claim.
+    # A user can have multiple roles across both claims.
+    roles_from_claim = claims.get("roles", [])
+    if not isinstance(roles_from_claim, list):
+        roles_from_claim = [roles_from_claim] if roles_from_claim else []
+    scp_raw = claims.get("scp", "")
+    roles_from_scp = scp_raw.split() if isinstance(scp_raw, str) and scp_raw.strip() else []
+    # Merge and deduplicate, preserving order.
+    seen = set()
+    all_roles = []
+    for r in roles_from_claim + roles_from_scp:
+        if r not in seen:
+            seen.add(r)
+            all_roles.append(r)
+
     return {
+        "auth_source": auth_source,
         "userId": user.get("userId"),
         "displayName": user.get("displayName"),
         "email": user.get("email"),
+        "upn": claims.get("upn"),
+        "roles": all_roles,
         "all_token_claims": claims,
     }
 
@@ -489,16 +588,20 @@ def list_public_workspaces(
     Uses the bearer token from PRM authentication to create a SimpleChat session.
     """
     bearer_token = _get_bearer_token_from_context(ctx)
-    
+    auth_source = "prm" if bearer_token else "device_code"
     if not bearer_token:
-        return {
-            "success": False,
-            "error": "no_bearer_token",
-            "message": "No bearer token available. Authentication via PRM is required.",
-            "hint": "Reconnect to the MCP server and complete PRM auth in the client.",
-        }
+        with _STATE_LOCK:
+            access_token = _STATE.get("access_token")
+        if isinstance(access_token, str) and access_token.strip():
+            bearer_token = access_token.strip()
+        else:
+            return {
+                "success": False,
+                "error": "not_authenticated",
+                "message": "Not authenticated. Provide a PRM bearer token or complete device-code login.",
+            }
     
-    print("[MCP] Using bearer token from PRM authentication")
+    print(f"[MCP] Using token from {auth_source} authentication")
     try:
         session = _get_or_create_simplechat_session(bearer_token)
     except Exception as e:
@@ -509,8 +612,8 @@ def list_public_workspaces(
             "hint": "Ensure your bearer token is valid and SimpleChat is accessible.",
         }
 
-    simplechat_base_url = _env("SIMPLECHAT_BASE_URL", required=False) or "https://localhost:5000"
-    simplechat_verify_ssl = os.getenv("SIMPLECHAT_VERIFY_SSL", "true").strip().lower() in ["1", "true", "yes", "y", "on"]
+    simplechat_base_url = _env("SIMPLECHAT_BASE_URL")
+    simplechat_verify_ssl = _require_env_bool("SIMPLECHAT_VERIFY_SSL")
 
     params: Dict[str, Any] = {
         "page": page,
@@ -540,7 +643,10 @@ def list_public_workspaces(
             "hint": "If this is 401/403, ensure your PRM bearer token has SimpleChat API access.",
         }
 
-    return response.json()
+    result = response.json()
+    if isinstance(result, dict):
+        result.setdefault("auth_source", auth_source)
+    return result
 
 
 class _PrmAndAuthShim:
@@ -551,6 +657,9 @@ class _PrmAndAuthShim:
         self._streamable_path = streamable_path
         self._require_auth = require_auth
         self._prm_metadata_path = prm_metadata_path
+
+        # Validate PRM metadata at startup (no fallbacks/defaults).
+        _ = self._load_prm_metadata()
     
     def _load_prm_metadata(self) -> Dict[str, Any]:
         candidate_path = Path(self._prm_metadata_path)
@@ -558,35 +667,25 @@ class _PrmAndAuthShim:
             candidate_path = Path(__file__).resolve().parent / candidate_path
         
         if not candidate_path.exists():
-            return {
-                "resource": f"http://localhost:{DEFAULT_MCP_PORT}",
-                "resource_name": "SimpleChat MCP",
-                "authorization_servers": [],
-                "scopes_supported": [],
-                "bearer_methods_supported": ["header"],
-            }
+            raise ValueError(f"PRM metadata file not found at {candidate_path}")
         
         with candidate_path.open("r", encoding="utf-8") as handle:
             data: Any = json.load(handle)
 
         if isinstance(data, dict):
             return cast(Dict[str, Any], data)
-        return {
-            "resource": f"http://localhost:{DEFAULT_MCP_PORT}",
-            "resource_name": "SimpleChat MCP",
-            "authorization_servers": [],
-            "scopes_supported": [],
-            "bearer_methods_supported": ["header"],
-        }
+        raise ValueError(f"PRM metadata at {candidate_path} must be a JSON object")
     
     @staticmethod
     def _get_request_origin(scope: Dict[str, Any]) -> str:
-        scheme = (scope.get("scheme") or "http").strip() or "http"
+        scheme = str(scope.get("scheme") or "").strip()
+        if not scheme:
+            scheme = _require_env_value("FASTMCP_SCHEME")
         headers_list = list(scope.get("headers", []))
         host_values = [value for (key, value) in headers_list if (key or b"").lower() == b"host"]
         host = b"".join(host_values).decode("utf-8", errors="ignore").strip()
         if not host:
-            host = f"localhost:{DEFAULT_MCP_PORT}"
+            host = f"{MCP_BIND_HOST}:{MCP_BIND_PORT}"
         return f"{scheme}://{host}"
     
     async def _send_json(self, send: Any, status: int, payload: Dict[str, Any], headers: Optional[list[tuple[bytes, bytes]]] = None) -> None:
@@ -734,26 +833,24 @@ class _PrmAndAuthShim:
 
 
 if __name__ == "__main__":
-    os.environ["FASTMCP_HOST"] = DEFAULT_MCP_HOST
-    os.environ["FASTMCP_PORT"] = str(DEFAULT_MCP_PORT)
-
     print(f"[MCP] Starting server with MCP_REQUIRE_AUTH={DEFAULT_REQUIRE_MCP_AUTH}")
     print(f"[MCP] PRM metadata path: {DEFAULT_PRM_METADATA_PATH}")
 
+    import uvicorn
+
+    base_app = _mcp.streamable_http_app()
+
     # Streamable HTTP transport is required for MCP Inspector.
     if DEFAULT_REQUIRE_MCP_AUTH:
-        import uvicorn
-        
-        base_app = _mcp.streamable_http_app()
-        wrapped_app = _PrmAndAuthShim(
+        app_to_run: Any = _PrmAndAuthShim(
             app=base_app,
             streamable_path="/mcp",
             require_auth=DEFAULT_REQUIRE_MCP_AUTH,
             prm_metadata_path=DEFAULT_PRM_METADATA_PATH,
         )
-        
-        print(f"[MCP] Server starting on http://{DEFAULT_MCP_HOST}:{DEFAULT_MCP_PORT}/mcp (with PRM authentication)")
-        uvicorn.run(wrapped_app, host=DEFAULT_MCP_HOST, port=DEFAULT_MCP_PORT, log_level="info")
+        print(f"[MCP] Server starting on {MCP_BIND_HOST}:{MCP_BIND_PORT}/mcp (with PRM authentication)")
     else:
-        print(f"[MCP] Server starting on http://{DEFAULT_MCP_HOST}:{DEFAULT_MCP_PORT}/mcp (no authentication)")
-        _mcp.run(transport="streamable-http")
+        app_to_run = base_app
+        print(f"[MCP] Server starting on {MCP_BIND_HOST}:{MCP_BIND_PORT}/mcp (no authentication)")
+
+    uvicorn.run(app_to_run, host=MCP_BIND_HOST, port=MCP_BIND_PORT, log_level="info")
