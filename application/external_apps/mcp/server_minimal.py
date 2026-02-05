@@ -15,16 +15,17 @@ Tools exposed:
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import requests
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 
 _DOTENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -35,6 +36,8 @@ else:
 
 DEFAULT_MCP_HOST = "localhost"
 DEFAULT_MCP_PORT = 8000
+DEFAULT_REQUIRE_MCP_AUTH = os.getenv("MCP_REQUIRE_AUTH", "false").strip().lower() in ["1", "true", "yes", "y", "on"]
+DEFAULT_PRM_METADATA_PATH = os.getenv("MCP_PRM_METADATA_PATH", "prm_metadata.json").strip() or "prm_metadata.json"
 
 _env_port = os.getenv("FASTMCP_PORT", "").strip()
 if _env_port and _env_port != str(DEFAULT_MCP_PORT):
@@ -42,6 +45,18 @@ if _env_port and _env_port != str(DEFAULT_MCP_PORT):
 
 
 _mcp = FastMCP("simplechat-mcp-minimal")
+
+# Session cache: bearer_token -> requests.Session
+_SESSION_CACHE: Dict[str, requests.Session] = {}
+_SESSION_LOCK = threading.Lock()
+
+# Cache the /external/login payload (contains user + claims) per bearer token.
+_LOGIN_PAYLOAD_CACHE: Dict[str, Dict[str, Any]] = {}
+
+# Cache bearer token per MCP streamable-http session id. This lets the server reuse
+# the PRM-provided bearer token across tool calls even if the client doesn't resend it.
+_MCP_SESSION_TOKEN_CACHE: Dict[str, Dict[str, Any]] = {}
+_MCP_SESSION_TOKEN_TTL_SECONDS = int(os.getenv("MCP_SESSION_TOKEN_TTL_SECONDS", "3600").strip() or "3600")
 
 _STATE_LOCK = threading.Lock()
 _STATE: Dict[str, Any] = {
@@ -66,6 +81,87 @@ def _env(name: str, required: bool = True) -> str:
     if required and not value:
         raise ValueError(f"Missing required setting {name} in {_DOTENV_PATH}")
     return value
+
+
+def _extract_bearer_token(auth_header: str) -> Optional[str]:
+    """Extract bearer token from Authorization header."""
+    if not auth_header:
+        return None
+    token = auth_header.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token or None
+
+
+def _get_bearer_token_from_context(ctx: Optional[Context[Any, Any, Any]]) -> Optional[str]:
+    """Extract bearer token from the current request Context.
+
+    This is the canonical way tools should access PRM-provided auth.
+    """
+    if ctx is None:
+        return None
+
+    request_context = getattr(ctx, "request_context", None)
+    request = getattr(request_context, "request", None) if request_context else None
+    headers = getattr(request, "headers", None) if request else None
+    if not headers:
+        return None
+
+    auth_header = headers.get("authorization")
+    return _extract_bearer_token(auth_header or "")
+
+
+def _get_or_create_simplechat_session(bearer_token: str) -> requests.Session:
+    """Get cached session or create new one via SimpleChat /external/login."""
+    with _SESSION_LOCK:
+        if bearer_token in _SESSION_CACHE:
+            print("[MCP] Using cached SimpleChat session for token")
+            return _SESSION_CACHE[bearer_token]
+    
+    # Create new session
+    simplechat_base_url = _env("SIMPLECHAT_BASE_URL", required=False) or "https://localhost:5000"
+    simplechat_verify_ssl = os.getenv("SIMPLECHAT_VERIFY_SSL", "true").strip().lower() in ["1", "true", "yes", "y", "on"]
+    
+    print("[MCP] Creating new SimpleChat session via /external/login")
+    
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Bearer {bearer_token}"})
+    
+    # Call SimpleChat /external/login to establish session
+    login_url = f"{simplechat_base_url}/external/login"
+    try:
+        response = session.post(login_url, json={}, verify=simplechat_verify_ssl, timeout=30)
+        
+        if response.status_code != 200:
+            try:
+                error_details = response.json()
+            except Exception:
+                error_details = {"raw": response.text}
+            raise RuntimeError(f"SimpleChat login failed ({response.status_code}): {error_details}")
+        
+        print("[MCP] SimpleChat session created successfully")
+
+        try:
+            login_payload: Dict[str, Any] = response.json()
+        except Exception:
+            login_payload = {}
+        
+        # Cache the session
+        with _SESSION_LOCK:
+            _SESSION_CACHE[bearer_token] = session
+            if login_payload:
+                _LOGIN_PAYLOAD_CACHE[bearer_token] = login_payload
+        
+        return session
+        
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Failed to connect to SimpleChat: {e}")
+
+
+def _get_cached_login_payload(bearer_token: str) -> Optional[Dict[str, Any]]:
+    with _SESSION_LOCK:
+        payload = _LOGIN_PAYLOAD_CACHE.get(bearer_token)
+    return payload if isinstance(payload, dict) else None
 
 
 def _resolve_device_code_url(token_url: str) -> str:
@@ -339,102 +435,79 @@ def oauth_login_status() -> Dict[str, Any]:
 
 
 @_mcp.tool(name="show_user_profile")
-def show_user_profile() -> Dict[str, Any]:
-    """Return SimpleChat user profile from the bearer token claims.
+def show_user_profile(ctx: Context[Any, Any, Any]) -> Dict[str, Any]:
+    """Return SimpleChat user profile from the PRM bearer token.
 
-    If not logged in yet, starts login and returns the device-code payload.
+    This tool must never initiate its own auth flow. It relies exclusively on
+    PRM/MCP client authentication and reuses that bearer token.
     """
-    with _STATE_LOCK:
-        user_profile = _STATE.get("user_profile")
-        token_claims = _STATE.get("token_claims")
-        session = _STATE.get("simplechat_session")
-        pending = bool(_STATE.get("pending"))
-        error = _STATE.get("error")
-        event = _STATE.get("event")
+    bearer_token = _get_bearer_token_from_context(ctx)
+    if not bearer_token:
+        return {
+            "success": False,
+            "error": "no_bearer_token",
+            "message": "No bearer token available. PRM authentication is required.",
+        }
 
-    print(f"[MCP] show_user_profile called: has_profile={bool(user_profile)} has_session={bool(session)} pending={pending}")
+    try:
+        _get_or_create_simplechat_session(bearer_token)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "session_creation_failed",
+            "message": str(e),
+        }
 
-    if not user_profile:
-        # If there's a login in progress, wait for it briefly
-        if pending and isinstance(event, threading.Event):
-            print("[MCP] Login in progress, waiting up to 15s for profile...")
-            event.wait(timeout=15)
-            with _STATE_LOCK:
-                user_profile = _STATE.get("user_profile")
-                token_claims = _STATE.get("token_claims")
-                error = _STATE.get("error")
-            print(f"[MCP] After wait: has_profile={bool(user_profile)} error={error}")
+    payload = _get_cached_login_payload(bearer_token) or {}
+    user = payload.get("user")
+    claims = payload.get("claims")
 
-        if not user_profile:
-            if error:
-                return {
-                    "success": False,
-                    "login_required": True,
-                    "message": f"Previous login failed: {error}",
-                    "error": error,
-                    "hint": "Call login_via_oauth to start a fresh login.",
-                }
-            else:
-                # Start a fresh login if none is in progress.
-                print("[MCP] No profile and no pending login, starting fresh login...")
-                payload = login_via_oauth()
-                payload["success"] = False
-                payload["login_required"] = True
-                return payload
+    if not isinstance(user, dict):
+        user = {}
+    user = cast(Dict[str, Any], user)
+    if not isinstance(claims, dict):
+        claims = {}
+    claims = cast(Dict[str, Any], claims)
 
     return {
-        "userId": user_profile.get("userId"),
-        "displayName": user_profile.get("displayName"),
-        "email": user_profile.get("email"),
-        "all_token_claims": token_claims or {},
+        "userId": user.get("userId"),
+        "displayName": user.get("displayName"),
+        "email": user.get("email"),
+        "all_token_claims": claims,
     }
 
 
 @_mcp.tool(name="list_public_workspaces")
 def list_public_workspaces(
+    ctx: Context[Any, Any, Any],
     page: int = 1,
     page_size: int = 25,
     search: Optional[str] = None
 ) -> Dict[str, Any]:
     """Return the authenticated user's public workspaces from SimpleChat.
     
-    If not logged in yet, starts login and returns the device-code payload.
+    Uses the bearer token from PRM authentication to create a SimpleChat session.
     """
-    with _STATE_LOCK:
-        session = _STATE.get("simplechat_session")
-        token = _STATE.get("access_token")
-        pending = bool(_STATE.get("pending"))
-        error = _STATE.get("error")
-        event = _STATE.get("event")
-
-    print(f"[MCP] list_public_workspaces called: has_session={bool(session)} has_token={bool(token)} pending={pending}")
-
-    if not session:
-        # If there's a login in progress, wait for it briefly
-        if pending and isinstance(event, threading.Event):
-            print("[MCP] Login in progress, waiting up to 15s for session...")
-            event.wait(timeout=15)
-            with _STATE_LOCK:
-                session = _STATE.get("simplechat_session")
-                error = _STATE.get("error")
-            print(f"[MCP] After wait: has_session={bool(session)} error={error}")
-
-        if not session:
-            if error:
-                return {
-                    "success": False,
-                    "login_required": True,
-                    "message": f"Previous login failed: {error}",
-                    "error": error,
-                    "hint": "Call login_via_oauth to start a fresh login.",
-                }
-            else:
-                # Start a fresh login if none is in progress.
-                print("[MCP] No session and no pending login, starting fresh login...")
-                payload = login_via_oauth()
-                payload["success"] = False
-                payload["login_required"] = True
-                return payload
+    bearer_token = _get_bearer_token_from_context(ctx)
+    
+    if not bearer_token:
+        return {
+            "success": False,
+            "error": "no_bearer_token",
+            "message": "No bearer token available. Authentication via PRM is required.",
+            "hint": "Reconnect to the MCP server and complete PRM auth in the client.",
+        }
+    
+    print("[MCP] Using bearer token from PRM authentication")
+    try:
+        session = _get_or_create_simplechat_session(bearer_token)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "session_creation_failed",
+            "message": str(e),
+            "hint": "Ensure your bearer token is valid and SimpleChat is accessible.",
+        }
 
     simplechat_base_url = _env("SIMPLECHAT_BASE_URL", required=False) or "https://localhost:5000"
     simplechat_verify_ssl = os.getenv("SIMPLECHAT_VERIFY_SSL", "true").strip().lower() in ["1", "true", "yes", "y", "on"]
@@ -464,15 +537,223 @@ def list_public_workspaces(
             "error": "simplechat_request_failed",
             "status_code": response.status_code,
             "details": details,
-            "hint": "If this is 401/403, ensure you have completed login_via_oauth.",
+            "hint": "If this is 401/403, ensure your PRM bearer token has SimpleChat API access.",
         }
 
     return response.json()
+
+
+class _PrmAndAuthShim:
+    """ASGI middleware that serves PRM metadata and enforces authentication."""
+    
+    def __init__(self, app: Any, streamable_path: str, require_auth: bool, prm_metadata_path: str) -> None:
+        self._app = app
+        self._streamable_path = streamable_path
+        self._require_auth = require_auth
+        self._prm_metadata_path = prm_metadata_path
+    
+    def _load_prm_metadata(self) -> Dict[str, Any]:
+        candidate_path = Path(self._prm_metadata_path)
+        if not candidate_path.is_absolute():
+            candidate_path = Path(__file__).resolve().parent / candidate_path
+        
+        if not candidate_path.exists():
+            return {
+                "resource": f"http://localhost:{DEFAULT_MCP_PORT}",
+                "resource_name": "SimpleChat MCP",
+                "authorization_servers": [],
+                "scopes_supported": [],
+                "bearer_methods_supported": ["header"],
+            }
+        
+        with candidate_path.open("r", encoding="utf-8") as handle:
+            data: Any = json.load(handle)
+
+        if isinstance(data, dict):
+            return cast(Dict[str, Any], data)
+        return {
+            "resource": f"http://localhost:{DEFAULT_MCP_PORT}",
+            "resource_name": "SimpleChat MCP",
+            "authorization_servers": [],
+            "scopes_supported": [],
+            "bearer_methods_supported": ["header"],
+        }
+    
+    @staticmethod
+    def _get_request_origin(scope: Dict[str, Any]) -> str:
+        scheme = (scope.get("scheme") or "http").strip() or "http"
+        headers_list = list(scope.get("headers", []))
+        host_values = [value for (key, value) in headers_list if (key or b"").lower() == b"host"]
+        host = b"".join(host_values).decode("utf-8", errors="ignore").strip()
+        if not host:
+            host = f"localhost:{DEFAULT_MCP_PORT}"
+        return f"{scheme}://{host}"
+    
+    async def _send_json(self, send: Any, status: int, payload: Dict[str, Any], headers: Optional[list[tuple[bytes, bytes]]] = None) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        response_headers = [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"cache-control", b"no-store"),
+        ]
+        if headers:
+            response_headers.extend(headers)
+        
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": response_headers,
+        })
+        await send({
+            "type": "http.response.body",
+            "body": body,
+        })
+    
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+        
+        path = scope.get("path") or ""
+        method = scope.get("method") or ""
+        
+        origin = self._get_request_origin(scope)
+        prm_url = f"{origin}/.well-known/oauth-protected-resource"
+        streamable_path = (self._streamable_path or "").rstrip("/")
+        normalized_path = path.rstrip("/")
+        
+        # Serve PRM metadata
+        if method == "GET" and path == "/.well-known/oauth-protected-resource":
+            prm = self._load_prm_metadata()
+            prm["resource"] = f"{origin}{streamable_path}"
+            await self._send_json(send, 200, prm)
+            return
+
+        # Enforce authentication for MCP endpoints (this is what triggers PRM handshake).
+        is_mcp_path = normalized_path == streamable_path or path.startswith(streamable_path + "/")
+        if self._require_auth and is_mcp_path:
+            headers_list = list(scope.get("headers", []))
+
+            # 1) Try Authorization header
+            auth_values = [value for (key, value) in headers_list if (key or b"").lower() == b"authorization"]
+            auth_header_bytes = b"".join(auth_values).strip()
+            auth_header = auth_header_bytes.decode("utf-8", errors="ignore") if auth_header_bytes else ""
+            bearer_token = _extract_bearer_token(auth_header)
+
+            # 2) If missing, try cached token via MCP session id header
+            session_id_values = [value for (key, value) in headers_list if (key or b"").lower() == b"mcp-session-id"]
+            mcp_session_id = b"".join(session_id_values).decode("utf-8", errors="ignore").strip() if session_id_values else ""
+
+            if not bearer_token and mcp_session_id:
+                with _SESSION_LOCK:
+                    cached = _MCP_SESSION_TOKEN_CACHE.get(mcp_session_id)
+                if isinstance(cached, dict):
+                    cached_token = cached.get("bearer_token")
+                    expires_at = cached.get("expires_at")
+                    if isinstance(expires_at, (int, float)) and expires_at < time.time():
+                        with _SESSION_LOCK:
+                            _MCP_SESSION_TOKEN_CACHE.pop(mcp_session_id, None)
+                    elif isinstance(cached_token, str) and cached_token.strip():
+                        bearer_token = cached_token.strip()
+                        # Inject Authorization header into scope so tools can read it via Context
+                        scope_headers = list(scope.get("headers", []))
+                        scope_headers.append((b"authorization", f"Bearer {bearer_token}".encode("utf-8")))
+                        scope["headers"] = scope_headers
+
+            has_token = bool(bearer_token)
+            print(
+                f"[MCP PRM] {method} {path} - has_bearer_token={has_token} has_mcp_session_id={bool(mcp_session_id)}"
+            )
+
+            if not has_token:
+                link_target = f'<{prm_url}>; rel="oauth-protected-resource"'.encode("utf-8")
+                # Keep this header minimal and PRM-focused so clients can discover metadata and reuse auth silently.
+                scope_hint = ""
+                try:
+                    prm = self._load_prm_metadata()
+                    scopes = prm.get("scopes_supported")
+                    if isinstance(scopes, list) and scopes and isinstance(scopes[0], str) and scopes[0].strip():
+                        scope_hint = scopes[0].strip()
+                except Exception:
+                    scope_hint = ""
+
+                if scope_hint:
+                    www_auth = f'Bearer resource_metadata="{prm_url}", scope="{scope_hint}"'.encode("utf-8")
+                else:
+                    www_auth = f'Bearer resource_metadata="{prm_url}"'.encode("utf-8")
+                await self._send_json(
+                    send,
+                    401,
+                    {
+                        "error": "unauthorized",
+                        "message": "Authorization required to use this MCP server.",
+                        "hint": "Complete PRM auth in the client; the server will cache the token after the first authenticated request.",
+                    },
+                    headers=[
+                        (b"www-authenticate", www_auth),
+                        (b"link", link_target),
+                    ],
+                )
+                return
+
+            # If we have a bearer token, capture the MCP session id from either the request
+            # (mcp-session-id header) or the response (base transport may assign it).
+            if bearer_token:
+                if mcp_session_id:
+                    with _SESSION_LOCK:
+                        _MCP_SESSION_TOKEN_CACHE[mcp_session_id] = {
+                            "bearer_token": bearer_token,
+                            "expires_at": time.time() + _MCP_SESSION_TOKEN_TTL_SECONDS,
+                        }
+
+                async def send_capture_session_id(message: Dict[str, Any]) -> None:
+                    if message.get("type") == "http.response.start":
+                        resp_headers = list(message.get("headers", []))
+                        resp_session_values = [
+                            value
+                            for (key, value) in resp_headers
+                            if (key or b"").lower() == b"mcp-session-id"
+                        ]
+                        resp_session_id = (
+                            b"".join(resp_session_values).decode("utf-8", errors="ignore").strip()
+                            if resp_session_values
+                            else ""
+                        )
+                        if resp_session_id:
+                            with _SESSION_LOCK:
+                                _MCP_SESSION_TOKEN_CACHE[resp_session_id] = {
+                                    "bearer_token": bearer_token,
+                                    "expires_at": time.time() + _MCP_SESSION_TOKEN_TTL_SECONDS,
+                                }
+                    await send(message)
+
+                await self._app(scope, receive, send_capture_session_id)
+                return
+        
+        await self._app(scope, receive, send)
 
 
 if __name__ == "__main__":
     os.environ["FASTMCP_HOST"] = DEFAULT_MCP_HOST
     os.environ["FASTMCP_PORT"] = str(DEFAULT_MCP_PORT)
 
+    print(f"[MCP] Starting server with MCP_REQUIRE_AUTH={DEFAULT_REQUIRE_MCP_AUTH}")
+    print(f"[MCP] PRM metadata path: {DEFAULT_PRM_METADATA_PATH}")
+
     # Streamable HTTP transport is required for MCP Inspector.
-    _mcp.run(transport="streamable-http")
+    if DEFAULT_REQUIRE_MCP_AUTH:
+        import uvicorn
+        
+        base_app = _mcp.streamable_http_app()
+        wrapped_app = _PrmAndAuthShim(
+            app=base_app,
+            streamable_path="/mcp",
+            require_auth=DEFAULT_REQUIRE_MCP_AUTH,
+            prm_metadata_path=DEFAULT_PRM_METADATA_PATH,
+        )
+        
+        print(f"[MCP] Server starting on http://{DEFAULT_MCP_HOST}:{DEFAULT_MCP_PORT}/mcp (with PRM authentication)")
+        uvicorn.run(wrapped_app, host=DEFAULT_MCP_HOST, port=DEFAULT_MCP_PORT, log_level="info")
+    else:
+        print(f"[MCP] Server starting on http://{DEFAULT_MCP_HOST}:{DEFAULT_MCP_PORT}/mcp (no authentication)")
+        _mcp.run(transport="streamable-http")
