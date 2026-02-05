@@ -14,4 +14,4 @@ ENV FASTMCP_PORT=8000
 
 EXPOSE 8000
 
-CMD ["python", "server.py"]
+CMD ["python", "server_minimal.py"]
