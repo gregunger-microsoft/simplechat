@@ -70,7 +70,11 @@ MCP_BIND_HOST = _require_env_value("FASTMCP_HOST")
 MCP_BIND_PORT = _require_env_int("FASTMCP_PORT")
 
 
-_mcp = FastMCP("simplechat-mcp-minimal")
+# Pass host=MCP_BIND_HOST so FastMCP does not auto-enable DNS rebinding
+# protection with localhost-only allowed_hosts.  When host is "0.0.0.0"
+# (local and Azure), FastMCP skips the restriction — otherwise the Azure
+# Container Apps FQDN in the Host header triggers a 421 Misdirected Request.
+_mcp = FastMCP("simplechat-mcp-minimal", host=MCP_BIND_HOST, port=MCP_BIND_PORT)
 
 # Session cache: bearer_token -> requests.Session
 _SESSION_CACHE: Dict[str, requests.Session] = {}
@@ -542,6 +546,16 @@ def show_user_profile(ctx: Context[Any, Any, Any]) -> Dict[str, Any]:
     user = payload.get("user")
     claims = payload.get("claims")
 
+    # If SimpleChat didn't return claims (older deployed version), decode
+    # the JWT locally (without signature verification — already validated
+    # by SimpleChat during /external/login).
+    if not isinstance(claims, dict) or not claims:
+        try:
+            import jwt as pyjwt
+            claims = pyjwt.decode(bearer_token, options={"verify_signature": False})
+        except Exception:
+            claims = {}
+
     if not isinstance(user, dict):
         user = {}
     user = cast(Dict[str, Any], user)
@@ -678,10 +692,27 @@ class _PrmAndAuthShim:
     
     @staticmethod
     def _get_request_origin(scope: Dict[str, Any]) -> str:
-        scheme = str(scope.get("scheme") or "").strip()
-        if not scheme:
-            scheme = _require_env_value("FASTMCP_SCHEME")
         headers_list = list(scope.get("headers", []))
+
+        # Behind a reverse proxy (e.g. Azure Container Apps), TLS is terminated
+        # at the ingress and the ASGI scope["scheme"] is always "http".
+        # Check X-Forwarded-Proto first, then FASTMCP_SCHEME, then scope.
+        forwarded_proto_values = [
+            value for (key, value) in headers_list
+            if (key or b"").lower() == b"x-forwarded-proto"
+        ]
+        forwarded_proto = (
+            b"".join(forwarded_proto_values).decode("utf-8", errors="ignore").strip()
+            if forwarded_proto_values else ""
+        )
+
+        if forwarded_proto:
+            scheme = forwarded_proto
+        else:
+            scheme = str(scope.get("scheme") or "").strip()
+            if not scheme:
+                scheme = _require_env_value("FASTMCP_SCHEME")
+
         host_values = [value for (key, value) in headers_list if (key or b"").lower() == b"host"]
         host = b"".join(host_values).decode("utf-8", errors="ignore").strip()
         if not host:

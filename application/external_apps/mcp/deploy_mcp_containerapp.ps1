@@ -158,7 +158,14 @@ if (-not $envExists) {
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -Path $scriptRoot
 
-$envFilePath = Join-Path $scriptRoot ".env"
+# Prefer .env.azure for cloud deployments, fall back to .env for local values
+$envFilePath = Join-Path $scriptRoot ".env.azure"
+if (-not (Test-Path $envFilePath)) {
+    $envFilePath = Join-Path $scriptRoot ".env"
+    Write-Host "Using local .env (no .env.azure found)"
+} else {
+    Write-Host "Using .env.azure for cloud deployment"
+}
 $envSettings = Get-EnvFileSettings -envFilePath $envFilePath
 
 if (-not $SimpleChatBaseUrl) {
