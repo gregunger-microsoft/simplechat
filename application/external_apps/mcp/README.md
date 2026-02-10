@@ -1,11 +1,46 @@
 # SimpleChat MCP Server (FastMCP)
 
-This MCP server provides four tools for interacting with SimpleChat:
+This MCP server provides **14 tools** for interacting with SimpleChat via the Model Context Protocol (Streamable HTTP transport).
 
-- **login_via_oauth**: Starts a device-code OAuth login flow and returns `user_code` + `verification_uri`.
-- **oauth_login_status**: Returns the current authentication status (PRM bearer token and/or device-code flow).
-- **show_user_profile**: Returns the authenticated user's profile, roles, and token claims from SimpleChat.
-- **list_public_workspaces**: Returns the authenticated user's public workspaces from SimpleChat.
+## Tools
+
+### Authentication (2 tools)
+| Tool | Auth | Description |
+|------|------|-------------|
+| **login_via_oauth** | None | Starts device-code OAuth login. Returns `user_code` + `verification_uri` for sign-in. |
+| **oauth_login_status** | Optional | Returns current login status for both PRM (bearer token) and device-code flows. |
+
+### User Profile (1 tool)
+| Tool | Auth | SimpleChat API | Description |
+|------|------|----------------|-------------|
+| **show_user_profile** | Required | `POST /external/login` | Returns the authenticated user's profile, roles, and all token claims. |
+
+### Conversations & Chat (3 tools)
+| Tool | Auth | SimpleChat API | Description |
+|------|------|----------------|-------------|
+| **list_conversations** | Required | `GET /api/get_conversations` | Returns all conversations for the authenticated user. |
+| **get_conversation_messages** | Required | `GET /api/get_messages` | Returns messages for a specific conversation. Params: `conversation_id` (required). |
+| **send_chat_message** | Required | `POST /api/chat` | Sends a message and returns AI response. Params: `message` (required), `conversation_id` (optional — creates new if empty). |
+
+### Personal Workspace (2 tools)
+| Tool | Auth | SimpleChat API | Description |
+|------|------|----------------|-------------|
+| **list_personal_documents** | Required | `GET /api/documents` | Returns paginated personal documents. Params: `page`, `page_size`, `search`, `classification`, `author`, `keywords`. |
+| **list_personal_prompts** | Required | `GET /api/prompts` | Returns paginated personal prompts. Params: `page`, `page_size`, `search`. |
+
+### Group Workspaces (3 tools)
+| Tool | Auth | SimpleChat API | Description |
+|------|------|----------------|-------------|
+| **list_group_workspaces** | Required | `GET /api/groups` | Returns paginated group workspaces the user is a member of. Params: `page`, `page_size`, `search`. |
+| **list_group_documents** | Required | `GET /api/group_documents` | Returns documents from the user's active group. Params: `page`, `page_size`, `search`, `classification`, `author`, `keywords`. |
+| **list_group_prompts** | Required | `GET /api/group_prompts` | Returns prompts from the user's active group. Params: `page`, `page_size`, `search`. |
+
+### Public Workspaces (3 tools)
+| Tool | Auth | SimpleChat API | Description |
+|------|------|----------------|-------------|
+| **list_public_workspaces** | Required | `GET /api/public_workspaces` | Returns paginated public workspaces. Params: `page`, `page_size`, `search`. |
+| **list_public_documents** | Required | `GET /api/public_documents` | Returns documents from the user's active public workspace. Params: `page`, `page_size`, `search`. |
+| **list_public_prompts** | Required | `GET /api/public_prompts` | Returns prompts from the user's active public workspace. Params: `page`, `page_size`, `search`. |
 
 ## Prerequisites
 
