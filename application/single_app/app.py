@@ -4,6 +4,20 @@ import logging
 import pickle
 import json
 import os
+import sys
+
+# Fix Windows encoding issue with Unicode characters (emojis, IPA symbols, etc.)
+# Must be done before any print statements that might contain Unicode
+if sys.platform == 'win32':
+    try:
+        # Reconfigure stdout and stderr to use UTF-8 encoding
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        # Python < 3.7 doesn't have reconfigure, try alternative
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 import app_settings_cache
 from config import *
@@ -55,9 +69,11 @@ from route_backend_notifications import *
 from route_backend_retention_policy import *
 from route_backend_plugins import bpap as admin_plugins_bp, bpdp as dynamic_plugins_bp
 from route_backend_agents import bpa as admin_agents_bp
+from route_backend_agent_templates import bp_agent_templates
 from route_backend_public_workspaces import *
 from route_backend_public_documents import *
 from route_backend_public_prompts import *
+from route_backend_user_agreement import register_route_backend_user_agreement
 from route_backend_speech import register_route_backend_speech
 from route_backend_tts import register_route_backend_tts
 from route_enhanced_citations import register_enhanced_citations_routes
@@ -97,6 +113,7 @@ Session(app)
 app.register_blueprint(admin_plugins_bp)
 app.register_blueprint(dynamic_plugins_bp)
 app.register_blueprint(admin_agents_bp)
+app.register_blueprint(bp_agent_templates)
 app.register_blueprint(plugin_validation_bp)
 app.register_blueprint(bp_migration)
 app.register_blueprint(plugin_logging_bp)
@@ -618,6 +635,9 @@ register_route_backend_public_documents(app)
 
 # ------------------- API Public Prompts Routes ----------
 register_route_backend_public_prompts(app)
+
+# ------------------- API User Agreement Routes ----------
+register_route_backend_user_agreement(app)
 
 # ------------------- Extenral Health Routes ----------
 register_route_external_health(app)
